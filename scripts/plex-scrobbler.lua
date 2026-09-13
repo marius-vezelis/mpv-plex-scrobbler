@@ -244,10 +244,10 @@ local function resolve_path(path)
     end
 
     local entry = lookup(c)
-    if entry then return entry end
-
     local age = c and (os.time() - (c.generated_at or 0)) or math.huge
-    if age > opts.cache_ttl or not c then
+
+    -- Refresh if not found (covers newly-added files) or simply stale.
+    if not entry or age > opts.cache_ttl then
         if refresh_cache() then
             entry = lookup(cache)
         end
