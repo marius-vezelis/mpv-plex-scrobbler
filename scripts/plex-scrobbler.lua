@@ -33,6 +33,8 @@ local session = {
     ratingKey = nil,
     duration = nil, -- ms
     active = false,
+    last_time_ms = nil, -- last known time-pos, ms (fallback for end-file/shutdown,
+                         -- since "time-pos" can already be unset by then)
 }
 
 local timer = nil
@@ -113,7 +115,8 @@ local function plex_get_json(path_and_query)
     return decoded
 end
 
--- Fire-and-forget async GET, used for timeline (progress/state) updates.
+-- Fire-and-forget async GET, used for routine timeline (progress/state)
+-- updates during playback.
 local function plex_get_async(path_and_query)
     local url = opts.plex_url .. path_and_query
     local sep = url:find("?") and "&" or "?"
@@ -127,6 +130,22 @@ local function plex_get_async(path_and_query)
         capture_stdout = false,
         capture_stderr = false,
     }, function() end)
+end
+
+-- Blocking GET, used for the final "stopped" update so mpv can't exit
+-- before it's actually sent (async requests can get killed mid-flight
+-- when mpv shuts down right after end-file).
+local function plex_get_sync(path_and_query)
+    local url = opts.plex_url .. path_and_query
+    local sep = url:find("?") and "&" or "?"
+    url = url .. sep .. "X-Plex-Token=" .. opts.token
+        .. "&X-Plex-Client-Identifier=" .. get_client_id()
+        .. "&X-Plex-Product=mpv&X-Plex-Device-Name=mpv"
+
+    utils.subprocess({
+        args = { "curl", "-s", "-m", "5", url },
+        cancellable = false,
+    })
 end
 
 -- Library cache (path -> ratingKey/duration)
@@ -239,12 +258,21 @@ end
 
 -- Scrobbling
 
-local function send_timeline(state)
+local function send_timeline(state, sync)
     if not session.active or not session.ratingKey then return end
 
+    -- "time-pos" can already be unset by the time end-file/shutdown fire,
+    -- so fall back to the last known position in that case.
     local time_pos = mp.get_property_number("time-pos")
-    if not time_pos then return end
-    local time_ms = math.floor(time_pos * 1000)
+    local time_ms
+    if time_pos then
+        time_ms = math.floor(time_pos * 1000)
+        session.last_time_ms = time_ms
+    elseif session.last_time_ms then
+        time_ms = session.last_time_ms
+    else
+        return
+    end
     local duration_ms = session.duration or math.floor((mp.get_property_number("duration") or 0) * 1000)
 
     -- The "identifier" param is required for Plex to persist the timeline
@@ -254,7 +282,11 @@ local function send_timeline(state)
         "/:/timeline?ratingKey=%s&key=/library/metadata/%s&identifier=com.plexapp.plugins.library&state=%s&time=%d&duration=%d",
         session.ratingKey, session.ratingKey, state, time_ms, duration_ms
     )
-    plex_get_async(timeline_query)
+    if sync then
+        plex_get_sync(timeline_query)
+    else
+        plex_get_async(timeline_query)
+    end
 end
 
 local function stop_timer()
@@ -288,6 +320,7 @@ local function on_file_loaded()
     session.active = false
     session.ratingKey = nil
     session.duration = nil
+    session.last_time_ms = nil
 
     if not is_configured() then return end
 
@@ -322,6 +355,12 @@ local function on_file_loaded()
     start_timer()
 end
 
+local function on_time_pos(_, time_pos)
+    if session.active and time_pos then
+        session.last_time_ms = math.floor(time_pos * 1000)
+    end
+end
+
 local function on_pause_change(_, paused)
     if not session.active then return end
     if paused then
@@ -339,7 +378,7 @@ end
 
 local function on_end_file()
     if session.active then
-        send_timeline("stopped")
+        send_timeline("stopped", true)
     end
     stop_timer()
     session.active = false
@@ -349,7 +388,7 @@ end
 
 local function on_shutdown()
     if session.active then
-        send_timeline("stopped")
+        send_timeline("stopped", true)
     end
 end
 
@@ -362,5 +401,6 @@ else
     mp.register_event("end-file", on_end_file)
     mp.register_event("shutdown", on_shutdown)
     mp.observe_property("pause", "bool", on_pause_change)
+    mp.observe_property("time-pos", "number", on_time_pos)
     mp.register_event("seek", on_seek)
 end
