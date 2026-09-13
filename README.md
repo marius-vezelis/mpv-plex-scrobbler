@@ -7,7 +7,7 @@ up correctly when you later watch on the TV app).
 ## How it works
 
 - When mpv loads a file, the script looks up the file's path in a local
-  cache mapping Plex library file paths to `ratingKey`s.
+  cache mapping Plex library file paths to Plex `ratingKey` values.
 - On a cache miss, it queries your Plex server's library sections (movies
   and TV episodes) and rebuilds the cache.
 - Once a match is found, the script sends Plex `/:/timeline` updates
